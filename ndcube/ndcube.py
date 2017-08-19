@@ -3,6 +3,7 @@ from collections import namedtuple
 from ndcube.visualization import animation as ani
 from ndcube import cube_utils as cu
 import sunpy.map
+from sunpy.map.mapcube import MapCube
 import matplotlib.pyplot as plt
 import sunpy.visualization.wcsaxes_compat as wcsaxes_compat
 import astropy.units as u
@@ -11,7 +12,6 @@ import ndcube.wcs_util
 import astropy.nddata
 import numpy as np
 import copy
-import warnings
 
 DimensionPair = namedtuple('DimensionPair', 'shape axis_types')
 SequenceDimensionPair = namedtuple('SequenceDimensionPair', 'shape axis_types')
@@ -24,7 +24,7 @@ class NDCube(astropy.nddata.NDData):
     Class representing N dimensional cubes.
     Extra arguments are passed on to NDData's init.
 
-    Attributes
+    Parameters
     ----------
     data: `numpy.ndarray`
         The array holding the actual data in this object.
@@ -53,7 +53,7 @@ class NDCube(astropy.nddata.NDData):
         Unit for the dataset. Strings that can be converted to a Unit are allowed.
         Default is None.
 
-    coords : `list` of `tuple`s, each with three entries (`str`, `int`, `astropy.units.quantity`)
+    extra_coords : `list` of `tuple`s, each with three entries (`str`, `int`, `astropy.units.quantity`)
         Gives the name, axis of data, and values of coordinates of a data axis not
         included in the WCS object.
 
@@ -64,7 +64,7 @@ class NDCube(astropy.nddata.NDData):
     """
 
     def __init__(self, data, uncertainty=None, mask=None, wcs=None, meta=None,
-                 unit=None, coords=None, copy=False, missing_axis=None, **kwargs):
+                 unit=None, extra_coords=None, copy=False, missing_axis=None, **kwargs):
         if missing_axis is None:
             self.missing_axis = [False]*wcs.naxis
         else:
@@ -78,17 +78,17 @@ class NDCube(astropy.nddata.NDData):
                 raise ValueError(
                     "The number of data dimensions and number of wcs non-missing axes do not match.")
 
-        self.coords = {}
+        self._extra_coords = {}
         coord_error = "Coord must have three properties supplied, name (str), axis (int), values (Quantity): {0}"
 
-        if coords:
-            for coord in coords:
+        if extra_coords:
+            for coord in extra_coords:
                 if len(coord) != 3:
                     raise ValueError(coord_error.format(coord))
                 elif not isinstance(coord[2], (str, int, astropy.units.quantity.Quantity)):
                     raise ValueError(coord_error.format(coord))
                 else:
-                    self.coords[coord[0]] = {"axis": coord[1], "value": coord[2]}
+                    self._extra_coords[coord[0]] = {"axis": coord[1], "value": coord[2]}
 
         super(NDCube, self).__init__(data, uncertainty=uncertainty, mask=mask,
                                      wcs=wcs, meta=meta, unit=unit, copy=copy, **kwargs)
@@ -193,8 +193,7 @@ class NDCube(astropy.nddata.NDData):
             if not missing_axis[wcs_axes.index("HPLT-TAN")] and not missing_axis[wcs_axes.index("HPLN-TAN")]:
                 result = sunpy.map.Map(self.data, self.meta)
         else:
-            warnings.warn("Object type not Implemented")
-            result = None
+            raise NotImplementedError("Object type not Implemented")
         return result
 
     @property
@@ -284,12 +283,24 @@ class NDCube(astropy.nddata.NDData):
                 uncertainty = self.uncertainty
         else:
             uncertainty = None
-        coords_keys = list(self.coords.keys())
+        extra_coords_keys = list(self._extra_coords.keys())
+        new_extra_coords = copy.deepcopy(self._extra_coords)
+        for ck in extra_coords_keys:
+            axis_ck = new_extra_coords[ck]["axis"]
+            if isinstance(item, (slice, int)):
+                if axis_ck is 0:
+                    new_extra_coords[ck]["value"] = new_extra_coords[ck]["value"][item]
+            if isinstance(item, tuple):
+                try:
+                    slice_item_extra_coords = item[axis_ck]
+                    new_extra_coords[ck]["value"] = new_extra_coords[
+                        ck]["value"][slice_item_extra_coords]
+                except IndexError as e:
+                    pass
         result = NDCube(data, wcs=wcs, mask=mask, uncertainty=uncertainty, meta=self.meta,
                         unit=self.unit, copy=False, missing_axis=missing_axis,
-                        coords=[(ck, self.coords[ck]["axis"],
-                                 self.coords[ck]["value"][item[self.coords[ck]["axis"]]])
-                                 for ck in coords_keys])
+                        extra_coords=[(ck, new_extra_coords[ck]["axis"], new_extra_coords[ck]["value"])
+                                      for ck in extra_coords_keys])
         return result
 
     def __repr__(self):
@@ -312,7 +323,7 @@ class NDCubeOrdered(NDCube):
     lambda, t, y cube the order will be (t, lambda, y).
     Extra arguments are passed on to NDData's init.
 
-    Attributes
+    Parameters
     ----------
     data: `numpy.ndarray`
         The array holding the actual data in this object.
@@ -455,7 +466,7 @@ class NDCubeSequence(object):
     """
     Class representing list of cubes.
 
-    Attributes
+    Parameters
     ----------
     data_list : `list`
         List of cubes.
@@ -484,6 +495,14 @@ class NDCubeSequence(object):
     def plot(self, *args, **kwargs):
         i = ani.ImageAnimatorNDCubeSequence(self, *args, **kwargs)
         return i
+
+    def to_sunpy(self, *args, **kwargs):
+        result = None
+        if all(isinstance(instance_sequence, sunpy.map.mapbase.GenericMap) for instance_sequence in self.data):
+            result = MapCube(self.data, *args, **kwargs)
+        else:
+            raise NotImplementedError("Sequence type not Implemented")
+        return result
 
     def explode_along_axis(self, axis):
         """
@@ -525,7 +544,7 @@ Length of NDCubeSequence:  {length}
 Length of 1st NDCube: {lengthNDCube}
 Axis Types of 1st NDCube: {axis_type}
 """.format(length=self.dimensions.shape[0], lengthNDCube=self.dimensions.shape[1::],
-           axis_type=self.dimensions.axis_types[1::]))
+                axis_type=self.dimensions.axis_types[1::]))
 
     @property
     def dimensions(self):
@@ -533,19 +552,21 @@ Axis Types of 1st NDCube: {axis_type}
                                      axis_types=tuple(["Sequence Axis"]+self.data[0].dimensions.axis_types))
 
     @property
-    def common_axis_coords(self):
+    def common_axis_extra_coords(self):
         if self.common_axis:
-            common_coords = {}
-            common_coords_list = []
-            coord_names = list(self[0].coords.keys())
+            common_extra_coords = {}
+            common_extra_coords_list = []
+            coord_names = list(self[0].extra_coords.keys())
             for coord_name in coord_names:
-                if self[0].coords[coord_name]["axis"] == self.common_axis:
-                    coord_unit = self[0].coords[coord_name]["value"].unit
-                    qs = tuple([np.asarray(c.coords["time"]["value"].to(coord_unit).value) for c in self])
-                    common_coords[coord_name] = u.Quantity(np.concatenate(qs), unit=coord_unit)
+                if self[0].extra_coords[coord_name]["axis"] == self.common_axis:
+                    coord_unit = self[0].extra_coords[coord_name]["value"].unit
+                    qs = tuple([np.asarray(c.extra_coords["time"]["value"].to(coord_unit).value)
+                                for c in self])
+                    common_extra_coords[coord_name] = u.Quantity(
+                        np.concatenate(qs), unit=coord_unit)
         else:
-            common_coords = None
-        return common_coords
+            common_extra_coords = None
+        return common_extra_coords
 
     @classmethod
     def _new_instance(cls, data_list, meta=None, common_axis=None):
@@ -562,12 +583,12 @@ Axis Types of 1st NDCube: {axis_type}
         Example
         -------
         >>> # Say we have three Cubes each cube has common_axis=0 is time and shape=(3,3,3)
-        >>> data_list = [cubeA, cubeB, cubeC]
-        >>> cs = NDCubeSequence(data_list, meta=None, common_axis=0)
+        >>> data_list = [cubeA, cubeB, cubeC] # doctest: +SKIP
+        >>> cs = NDCubeSequence(data_list, meta=None, common_axis=0) # doctest: +SKIP
         >>> # return zeroth time slice of cubeB in via normal NDCubeSequence indexing.
-        >>> cs[1,:,0,:]
+        >>> cs[1,:,0,:] # doctest: +SKIP
         >>> # Return same slice using this function
-        >>> cs.index_sequence_as_cube[3:6, 0,   :]
+        >>> cs.index_sequence_as_cube[3:6, 0, :] # doctest: +SKIP
         """
         if self.common_axis is None:
             raise ValueError("common_axis cannot be None")
@@ -576,17 +597,14 @@ Axis Types of 1st NDCube: {axis_type}
 
 class _IndexAsCubeSlicer(object):
     """
-    Helper class to make slicing in index_as_cube more pythonic.
-    Helps to make operations like in numpy array.
-    >>> data_list = numpy.array(range(10))
-    >>> data_list[3:5]
-    >>> [4, 5, 6]
-    This makes slicing like this possible for index_as_cube.
+    Helper class to make slicing in index_as_cube sliceable/indexable
+    like a numpy array.
 
-    Attributes
+    Parameters
     ----------
     seq : `ndcube.NDCubeSequence`
         Object of NDCubeSequence.
+
     """
 
     def __init__(self, seq):

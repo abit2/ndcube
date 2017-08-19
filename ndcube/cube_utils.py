@@ -36,7 +36,7 @@ def select_order(axtypes):
     return result
 
 
-def get_cube_from_sequence(cubesequence, item):
+def get_cube_from_sequence(cubesequence, item, type_slice=None):
     """
     Handles CubeSequence's __getitem__ method for list of cubes.
 
@@ -47,27 +47,35 @@ def get_cube_from_sequence(cubesequence, item):
     item: int, slice object, or tuple of these
         The item to get from the cube
     """
+    result = deepcopy(cubesequence)
     if isinstance(item, int):
-        result = cubesequence.data[item]
+        result = result.data[item]
     if isinstance(item, slice):
-        data = cubesequence.data[item]
-        result = cubesequence._new_instance(
-            data, meta=cubesequence.meta, common_axis=cubesequence.common_axis)
+        result.data = result.data[item]
     if isinstance(item, tuple):
         # if the 0th index is int.
         if isinstance(item[0], int):
             # to satisfy something like cubesequence[0,0] this should have data type
             # as cubesequence[0][0]
             if len(item[1::]) is 1:
-                result = cubesequence.data[item[0]][item[1]]
+                result = result.data[item[0]][item[1]]
             else:
-                result = cubesequence.data[item[0]][item[1::]]
+                result = result.data[item[0]][item[1::]]
         # if the 0th index is slice.
         # used for the index_sequence_as_cube function. Slicing across cubes.
         # item represents (slice(start_cube_index, end_cube_index, None),
         # [slice_of_start_cube, slice_of_end_cube]) if end cube is not sliced then length is 1.
-        if isinstance(item[0], slice):
-            data = cubesequence.data[item[0]]
+        elif isinstance(item[0], slice) and type_slice is None:
+            if len(item[1::]) is 1:
+                result.data = result.data[item[0]]
+                for i, data in enumerate(result.data):
+                    result.data[i] = data[item[1]]
+            else:
+                result.data = result.data[item[0]]
+                for i, data in enumerate(result.data):
+                    result.data[i] = data[item[1::]]
+        elif isinstance(item[0], slice) and type_slice is 'sequence_as_cube':
+            data = result.data[item[0]]
             # applying the slice in the start of cube.
             data[0] = data[0][item[1][0]]
             if len(item[1]) is 2:
@@ -79,8 +87,7 @@ def get_cube_from_sequence(cubesequence, item):
                     data[i] = cube[item[2]]
                 else:
                     data[i] = cube[item[2::]]
-            result = cubesequence._new_instance(
-                data, meta=cubesequence.meta, common_axis=cubesequence.common_axis)
+            result.data = data
     return result
 
 
@@ -108,12 +115,12 @@ def index_sequence_as_cube(cubesequence, item):
     Example
     -------
     >>> # Say we have three Cubes each cube has common_axis=1 is time and shape=(3,3,3)
-    >>> data_list = [cubeA, cubeB, cubeC]
-    >>> cs = CubeSequence(data_list, meta=None, common_axis=1)
+    >>> data_list = [cubeA, cubeB, cubeC] # doctest: +SKIP
+    >>> cs = CubeSequence(data_list, meta=None, common_axis=1) # doctest: +SKIP
     >>> # return zeroth time slice of cubeB in via normal CubeSequence indexing.
-    >>> cs[1,:,0,:]
+    >>> cs[1,:,0,:] # doctest: +SKIP
     >>> # Return same slice using this function
-    >>> index_sequence_as_cube(cs, (slice(0, cubeB.shape[0]), 0, (slice(0, cubeB.shape[2]))
+    >>> index_sequence_as_cube(cs, (slice(0, cubeB.shape[0]), 0, (slice(0, cubeB.shape[2])) # doctest: +SKIP
 
     """
     # Determine starting slice of each cube along common axis.
@@ -175,7 +182,7 @@ def index_sequence_as_cube(cubesequence, item):
     item_tuple = tuple(item_list)
     if item is None or (isinstance(item, tuple) and None in item):
         raise IndexError("None indices not supported")
-    return get_cube_from_sequence(cubesequence, item_tuple)
+    return get_cube_from_sequence(cubesequence, item_tuple, type_slice='sequence_as_cube')
 
 
 def _convert_cube_like_index_to_sequence_indices(cube_like_index, cumul_cube_lengths):
@@ -243,3 +250,12 @@ def _convert_cube_like_slice_to_sequence_slices(cube_like_slice, cumul_cube_leng
         cube_slice = slice(cube_start_index, cube_stop_index, cube_like_slice.step)
         sequence_slice = slice(sequence_start_index, sequence_stop_index+1, cube_like_slice.step)
     return sequence_slice, cube_slice
+
+
+def assert_extra_coords_equal(test_input, extra_coords):
+    assert test_input._extra_coords.keys() == extra_coords.keys()
+    for key in test_input._extra_coords.keys():
+        assert test_input._extra_coords[key]['axis'] == extra_coords[key]['axis']
+        assert np.all(test_input._extra_coords[key][
+                      'value'].value == extra_coords[key]['value'].value)
+        assert test_input._extra_coords[key]['value'].unit == extra_coords[key]['value'].unit
